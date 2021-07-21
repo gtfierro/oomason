@@ -6,6 +6,7 @@ class Unit:
     _uri = ""
     _name = ""
     _symbol = ""
+    _defn = ""
 
     @property
     def URI(self):
@@ -18,6 +19,10 @@ class Unit:
     @property
     def symbol(self):
         return str(self._symbol)
+
+    @property
+    def definition(self):
+        return str(self._defn)
 
     def __repr__(self):
         return f"<Unit: {self.name}>"

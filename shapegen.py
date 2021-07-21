@@ -13,6 +13,14 @@ class {{ shape_name }}(EntityProperty):
     {{ name }}: {{ type }}
     {% endfor %}
 
+    {% if possible_values %}
+    possible_values = {{ possible_values }}
+    {% endif %}
+
+    {% if possible_units %}
+    possible_units = {{ possible_units }}
+    {% endif %}
+
     def __post_init__(self):
         self.URI = BNode()
         self.classURI = rdflib.URIRef("{{ shape }}")
@@ -62,7 +70,10 @@ def get_type(defn):
             return f"Optional[{etype}]"
         return etype
 
-
+def get_val(thing):
+    if isinstance(thing, rdflib.Literal):
+        return thing.toPython()
+    return thing
 
 def make_shape_class(shape, defn):
     """
@@ -77,7 +88,11 @@ def make_shape_class(shape, defn):
         }
     """
     shape_name = shape.split('#')[-1]
-    prop_tuples = []
+    args = {
+        'shape': shape,
+        'shape_name': shape_name,
+        'shape_props': [],
+    }
     # rewrite property names
     prop_names = list(defn.keys())[:]
     for prop_name in prop_names:
@@ -87,18 +102,17 @@ def make_shape_class(shape, defn):
     # do 'value' first if it exists
     if 'value' in defn:
         value_def = defn.pop('value')
-        prop_tuples.append(('value', get_type(value_def)))
+        if 'enum_vals' in value_def:
+            args['possible_values'] = [get_val(x) for x in value_def['enum_vals']]
+        args['shape_props'].append(('value', get_type(value_def)))
     if 'hasUnit' in defn:
         value_def = defn.pop('hasUnit')
-        prop_tuples.append(('hasUnit', "Unit"))
+        if 'enum_vals' in value_def:
+            args['possible_units'] = [get_val(x) for x in value_def['enum_vals']]
+        args['shape_props'].append(('hasUnit', "Unit"))
     for prop_name, value_def in defn.items():
-        prop_tuples.append((prop_name, get_type(value_def)))
+        args['shape_props'].append((prop_name, get_type(value_def)))
 
-    args = {
-        'shape': shape,
-        'shape_name': shape_name,
-        'shape_props': prop_tuples,
-    }
     #print(t.render(**args))
     exec(compile(t.render(**args), '<string>', 'exec'), globals(), locals())
     return locals()[shape_name]

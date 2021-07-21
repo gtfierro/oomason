@@ -39,6 +39,7 @@ class BrickClassGenerator:
             self.graph = brick_graph
         else:
             self.graph = brickschema.Graph(load_brick_nightly=True)
+        self.graph.parse("http://qudt.org/vocab/unit/", format="ttl")
 
         self._build_equipment()
         self._build_points()
@@ -191,17 +192,25 @@ class BrickClassGenerator:
         self._classname_lookup[ns.BRICK['Location']] = self.Location
 
     def _build_units(self):
-        res = self.graph.query("""SELECT ?unit ?symbol ?label WHERE {
-            ?x qudt:applicableUnit ?unit .
-            ?unit qudt:symbol ?symbol .
-            ?unit rdfs:label ?label 
+        res = self.graph.query("""SELECT ?unit ?symbol ?label ?expr ?defn WHERE {
+            ?unit a  qudt:Unit .
+            ?unit rdfs:label ?label .
+            OPTIONAL {?unit qudt:symbol ?symbol } .
+            OPTIONAL {?unit qudt:expression ?expr } .
+            OPTIONAL { ?unit dcterms:description ?defn }
         }""")
-        for (unit, symbol, label) in res:
+        for (unit, symbol, label, expr, defn) in res:
             inst = Unit()
             inst._uri = unit
-            inst._symbol = symbol
+            if symbol is not None:
+                inst._symbol = symbol
+            elif expr is not None:
+                inst._symbol = f"${expr}$"
             inst._name = label
+            inst._defn = defn
             safe_name = label.replace(' ', '_')
+            safe_name = safe_name.replace('^', 'exp')
+            safe_name = safe_name.replace('(','').replace(')','')
             setattr(self.Unit, safe_name, inst)
 
 
