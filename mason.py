@@ -1,31 +1,38 @@
 import rdflib
+from collections import defaultdict
+import re
+import ast
+from enum import Enum
 import brickschema
 from brickschema import namespaces as ns
 from typing import Optional
+import shapegen
+from upper import Unit, Entity, EntityProperty
 
-class Entity:
-    _class_label = "Brick Entity"
-    _definition = ""
+def rev(s):
+    return ''.join(reversed(s))
 
-    _all_entities = []
+def make_enum(enum_name, enum_vals):
+    vals = []
+    for val in enum_vals:
+        if isinstance(val, rdflib.URIRef):
+            key, ns = re.split(r':|#|/', rev(str(val)), 1)
+            key = rev(key)
+            vals.append((key, val))
+        elif isinstance(val, rdflib.Literal):
+            val = str(val)
+            vals.append((val, val))
+    return Enum(enum_name, vals)
 
-    def __init__(self, URI: rdflib.URIRef, label: Optional[str] = None):
-        self.URI = URI
-        self.entity_label = label
-        self._properties = []
-        self._all_entities.append(self)
 
-    @property
-    def class_label(self):
-        return str(self._class_label)
-
-    @property
-    def definition(self):
-        return str(self._definition)
-
+class placeholder:
+    pass
 
 class BrickClassGenerator:
     _propname_lookup = {}
+    _classname_lookup = {}
+    EntityProperty = placeholder()
+    Unit = placeholder()
 
     def __init__(self, brick_graph: Optional[rdflib.Graph] = None):
         if brick_graph is not None:
@@ -33,33 +40,13 @@ class BrickClassGenerator:
         else:
             self.graph = brickschema.Graph(load_brick_nightly=True)
 
-        # construct initial Equipment class
-        self.Equipment = type(
-                "Equipment",
-                (Entity,),
-                {
-                    "classURI": ns.BRICK["Equipment"],
-                    "_class_label": "Equipment",
-                    "__repr__": _brick_repr,
-                },
-            )
-        # construct subclasses recursively
-        self._build_subclasses(self.Equipment, set())
+        self._build_equipment()
+        self._build_points()
+        self._build_locations()
+        self._build_units()
+        self._build_shapes()
 
-        self.Point = type(
-                "Point",
-                (Entity,),
-                {"classURI": ns.BRICK["Point"], "_class_label": "Point", "__repr__": _brick_repr},
-            )
-        self._build_subclasses(self.Point, set())
-
-        self.Location = type(
-                "Location",
-                (Entity,),
-                {"classURI": ns.BRICK["Location"], "_class_label": "Location", "__repr__": _brick_repr},
-            )
-        self._build_subclasses(self.Location, set())
-
+        self._build_shape_class(ns.BRICK["CoolingCapacityShape"])
 
         # get possible relationships
         res = self.graph.query("""SELECT ?prop ?dom ?rng WHERE {
@@ -92,15 +79,50 @@ class BrickClassGenerator:
                 ?prop sh:or/rdf:rest*/rdf:first/sh:class ?allowed
             }
         }""")
-        for (prop, dom, _rng) in res:
+        prop_defs = defaultdict(lambda : defaultdict(set))
+
+        for (prop, dom, rng) in res:
             propname = prop.split('#')[-1]
+            prop_defs[propname]['dom'].add(dom)
+            prop_defs[propname]['rng'].add(rng)
             self._propname_lookup[propname] = prop
-            if dom is not None:
+
+        # get possible entity properties
+        res = self.graph.query("""SELECT ?prop ?dom ?rng WHERE {
+            ?prop   a   brick:EntityProperty .
+            OPTIONAL { ?prop rdfs:domain ?dom } .
+            OPTIONAL { ?prop rdfs:range ?rng } .
+        }""")
+        for (prop, dom, rng) in res:
+            propname = prop.split('#')[-1]
+            prop_defs[propname]['dom'].add(dom)
+            prop_defs[propname]['rng'].add(rng)
+            self._propname_lookup[propname] = prop
+
+        for prop, defn in prop_defs.items():
+            domains = []
+            for dom in defn.get('dom', []):
+                if not dom:
+                    continue
                 domclass = dom.split('#')[-1]
-                if hasattr(self, domclass):
-                    add_property_to_class(getattr(self, domclass), propname)
-            else:
-                add_property_to_class(Entity, propname)
+                domains.append(getattr(self, domclass))
+            if not len(domains):
+                domains.append(Entity)
+
+            ranges = []
+            for rng in defn.get('rng', []):
+                if not rng:
+                    continue
+                # TODO: needs the shape classes to exist
+                rngclass = self._classname_lookup.get(rng)
+                if rngclass:
+                    ranges.append(rngclass)
+
+            for dom in domains:
+                add_property_to_class(dom, prop, dtypes=tuple(ranges))
+            # if no domain? add to all Entities
+            if len(domains) == 0:
+                add_property_to_class(Entity, prop, dtypes=tuple(ranges))
 
 
     def _build_subclasses(self, rootclass, visited=None):
@@ -131,15 +153,133 @@ class BrickClassGenerator:
                 klass._definition = defn
                 klass.__doc__ = defn
             setattr(self, name, klass)
+            self._classname_lookup[rootclass] = klass
             self._build_subclasses(klass,  visited=visited)
 
 
+    def _build_equipment(self):
+        # construct initial Equipment class
+        self.Equipment = type(
+                "Equipment",
+                (Entity,),
+                {
+                    "classURI": ns.BRICK["Equipment"],
+                    "_class_label": "Equipment",
+                    "__repr__": _brick_repr,
+                },
+            )
+        # construct subclasses recursively
+        self._build_subclasses(self.Equipment, set())
+        self._classname_lookup[ns.BRICK['Equipment']] = self.Equipment
 
-def add_property_to_class(target, propname):
+    def _build_points(self):
+        self.Point = type(
+                "Point",
+                (Entity,),
+                {"classURI": ns.BRICK["Point"], "_class_label": "Point", "__repr__": _brick_repr},
+            )
+        self._build_subclasses(self.Point, set())
+        self._classname_lookup[ns.BRICK['Point']] = self.Point
+
+    def _build_locations(self):
+        self.Location = type(
+                "Location",
+                (Entity,),
+                {"classURI": ns.BRICK["Location"], "_class_label": "Location", "__repr__": _brick_repr},
+            )
+        self._build_subclasses(self.Location, set())
+        self._classname_lookup[ns.BRICK['Location']] = self.Location
+
+    def _build_units(self):
+        res = self.graph.query("""SELECT ?unit ?symbol ?label WHERE {
+            ?x qudt:applicableUnit ?unit .
+            ?unit qudt:symbol ?symbol .
+            ?unit rdfs:label ?label 
+        }""")
+        for (unit, symbol, label) in res:
+            inst = Unit()
+            inst._uri = unit
+            inst._symbol = symbol
+            inst._name = label
+            safe_name = label.replace(' ', '_')
+            setattr(self.Unit, safe_name, inst)
+
+
+    def _build_shapes(self):
+        res = self.graph.query("""SELECT ?shape WHERE {
+            ?shape  a   sh:NodeShape .
+            ?prop   rdfs:range ?shape .
+            ?prop   a   brick:EntityProperty 
+        }""")
+        for (shape,) in res:
+            self._build_shape_class(shape)
+
+
+    # TODO: how to handle shapes?
+    def _build_shape_class(self, shape):
+        res = self.graph.query(f"""SELECT ?path ?min ?enum ?datatype ?class WHERE {{
+            <{shape}> sh:property ?prop .
+            ?prop sh:path ?path .
+            OPTIONAL {{ ?prop sh:in/rdf:rest*/rdf:first ?enum }} .
+            OPTIONAL {{ ?prop sh:datatype ?datatype }} .
+            OPTIONAL {{ ?prop sh:class ?class }} .
+            OPTIONAL {{ ?prop sh:minCount ?min }}
+        }}""")
+        shape_name = shape.split('#')[-1]
+        props = {}
+        for (path, mincount, enum, datatype, classtype) in res:
+            if path not in props:
+                props[path] = {"enum_vals": []}
+
+            if enum is not None:
+                props[path]['enum_vals'].append(enum)
+
+            if datatype is not None:
+                props[path]['datatype'] = datatype
+
+            if classtype is not None:
+                if 'classtype' not in props[path]:
+                    props[path]['classtype'] = []
+                props[path]['classtype'].append(classtype)
+
+            if datatype is not None:
+                props[path]['datatype'] = datatype
+            if mincount is None:
+                props[path]['required'] = False
+            elif int(mincount) > 0:
+                props[path]['required'] = True
+            else:
+                props[path]['required'] = False
+
+
+        attrs = {}
+        prop_args = []
+        for(prop, defn) in props.items():
+            prop_name = prop.split('#')[-1]
+            if len(defn['enum_vals']) > 0:
+                enum = make_enum(prop_name, defn['enum_vals'])
+                setattr(self, prop_name, enum)
+                attrs[prop_name] = enum
+                prop_args.append((prop_name, type(defn['enum_vals'][0])))
+            elif 'datatype' in defn:
+                prop_args.append((prop_name, rdflib.URIRef))
+            else:
+                prop_args.append((prop_name, rdflib.URIRef))
+        kls = shapegen.make_shape_class(shape, props)
+        string_name = shape_name.split('#')[-1]
+        setattr(self.EntityProperty, string_name, kls)
+
+
+
+# TODO: handle dtype (need to handle *lists* of possible dtypes)
+def add_property_to_class(target, propname, dtypes=None):
     def f(self, ent: Entity):
         if not hasattr(self, propname):
+            # TODO: add type assert?
             self._properties.append(propname)
             setattr(self, propname, [])
+        if dtypes is not None and len(dtypes):
+            assert isinstance(ent, dtypes), f"Entity {ent} must have type {dtypes} to be used as object of {propname}"
         getattr(self, propname).append(ent)
     setattr(target, f"add_{propname}", f)
 
@@ -150,22 +290,34 @@ def _brick_repr(self):
 
 def compile_model(binds):
     g = brickschema.Graph()
-    for (pfx, ns) in binds:
-        g.bind(pfx, ns)
+    for (pfx, namespace) in binds:
+        g.bind(pfx, namespace)
     for ent in Entity._all_entities:
         g.add((ent.URI, ns.A, ent.classURI))
         for propname in ent._properties:
             prop = BrickClassGenerator._propname_lookup[propname]
             for propval in getattr(ent, propname):
                 g.add((ent.URI, prop, propval.URI))
+    for ep in shapegen.EntityProperty._instances:
+        g.add((ep.URI, ns.A, ep.classURI))
+        for prop_name in ep.__annotations__.keys():
+            val = getattr(ep, prop_name)
+            if isinstance(val, (Entity, EntityProperty, Unit)):
+                g.add((ep.URI, shapegen.prop_lookup[prop_name], val.URI))
+            elif isinstance(val, rdflib.URIRef):
+                g.add((ep.URI, shapegen.prop_lookup[prop_name], val))
+            else:
+                g.add((ep.URI, shapegen.prop_lookup[prop_name], rdflib.Literal(val)))
+
     valid, _, report = g.validate()
     if not valid:
         raise Exception(report)
     return g
 
-Brick = BrickClassGenerator()
-Brick11 = BrickClassGenerator(brickschema.Graph(brick_version="1.1"))
-Brick12 = BrickClassGenerator(brickschema.Graph(brick_version="1.2"))
+g = brickschema.Graph().load_file("Brick.ttl")
+Brick = BrickClassGenerator(g)
+#Brick11 = BrickClassGenerator(brickschema.Graph(brick_version="1.1"))
+#Brick12 = BrickClassGenerator(brickschema.Graph(brick_version="1.2"))
 
 if __name__ == '__main__':
     BLDG = rdflib.Namespace("example#")
@@ -194,7 +346,22 @@ if __name__ == '__main__':
     bldg.add_isLocationOf(vav1)
     bldg.add_isLocationOf(vav2)
 
+    fl1 = Brick.Floor(BLDG["floor1"], "Floor 1")
+    bldg.add_hasPart(fl1)
+    rm1 = Brick.Room(BLDG["room1"], "Room 1")
+    fl1.add_hasPart(rm1)
+    rm1.add_area(Brick.EntityProperty.AreaShape(10, Brick.Unit.Quad))
+
     graph = compile_model([
         ("bldg", BLDG)
     ])
     graph.serialize("output.ttl", format="ttl")
+
+    kls = Brick._build_shape_class(ns.BRICK["CoolingCapacityShape"])
+
+    p = Brick.Temperature_Sensor(BLDG['bad_sensor'])
+    try:
+        bldg.add_hasPart(p) # this will throw an assertion error
+    except AssertionError as e:
+        print("Successfully caught bad model!")
+        print(e)
